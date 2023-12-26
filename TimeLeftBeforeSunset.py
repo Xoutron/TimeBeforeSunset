@@ -31,6 +31,9 @@ import os
 
 lang = 'fr' # 'fr' (French) or 'en' (English)
 
+#---
+#  Translation function
+#---
 def translate_city(city, lang):
     if lang == 'en':
         if city == 'Trondheim (Norvège)':
@@ -47,19 +50,42 @@ def translate_city(city, lang):
             city = 'Quito (Ecuador)'
     # elif lang == 'fr': will stay as it was
     return city
-def get_zenith(time, month, lat):
+
+#---
+#  Computing functions
+#---
+def get_time_pd(time, month):
     hour = math.floor(time)
     minute = math.floor((time - math.floor(time))*60)
     second = (time - hour - minute/60)*3600
-    lon = 0 # The sunset's speed does not depend on longitude. Greenwich's fine!
-    # Inspiration :
-    # https://pvlib-python.readthedocs.io/en/stable/gallery/solar-position/plot_sunpath_diagrams.html
-    # https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.solarposition.get_solarposition.html
     time_pd = pd.DatetimeIndex(data = [str(month) + "/21/2023 "
                                        + str(hour) + ":"
                                        + str(minute) + ":"
                                        + str(second)], tz = 'etc/UTC')
+    return time_pd
+def get_solar_angular_radius(month):
+    time_pd = get_time_pd(12, month) # Retrieve at noon (approximate)
+    # Earth-sun distance in A.U. (astronominal unit), through
+    # https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.solarposition.nrel_earthsun_distance.html
+    earth_sun_distance_AU = solarposition.nrel_earthsun_distance(time_pd)[0]
+    # 1 A.U. = 149597870.7 km [https://en.wikipedia.org/wiki/Astronomical_unit]
+    earth_sun_distance = earth_sun_distance_AU * 149597870.7
+    # Solar radius extracted from: Emilio, Marcelo; Kuhn, Jeff R.; Bush,
+    # Rock I.; Scholl, Isabelle F. (2012), "Measuring the Solar Radius from
+    # Space during the 2003 and 2006 Mercury Transits", The Astrophysical
+    # Journal, 750 (2): 135, https://arxiv.org/pdf/1203.4898.pdf
+    solar_radius = 696342 # [km]
+    # https://en.m.wikipedia.org/wiki/Angular_diameter#Formula
+    angle = np.arcsin(solar_radius/earth_sun_distance)
+    # Convert that angle from radians to degree
+    return angle*180/math.pi
+def get_zenith(time, month, lat):
+    time_pd = get_time_pd(time, month)
+    lon = 0 # The sunset's speed does not depend on longitude. Greenwich's fine!
+    # https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.solarposition.get_solarposition.html
     solar_zenith = solarposition.get_solarposition(time_pd, lat, lon)
+    # 'apparent_zenith' takes atmospheric refraction into account, with
+    # average atmospheric conditions
     return solar_zenith['apparent_zenith']
 
 def wrapper_get_zenith(time, month, lat):
@@ -104,24 +130,9 @@ nhand = 3 # number of hands, obtained by stacking them alternately
 for hand in range(nhand):
     angles = np.append(angles,
                        # Add a quarter degree uncertainty per additional hand
-                       finger_angles +  np.array([1]*4)*ufloat(0, hand*0.25))
+                       finger_angles + np.array([1]*4)*ufloat(0, hand*0.25))
 # Cumulative angle, from little finger alone (at horizon level) to all fingers
 finger_angles = np.cumsum(angles)
-# "For computational purposes, sunrise or sunset is defined to occur when the
-# geometric zenith distance of center of the Sun is 90.8333 degrees. That is,
-# the center of the Sun is geometrically 50 arcminutes below a horizontal
-# plane. For an observer at sea level with a level, unobstructed horizon, under
-# average atmospheric conditions, the upper limb of the Sun will then appear to
-# be tangent to the horizon. The 50-arcminute geometric depression of the Sun's
-# center used for the computations is obtained by adding the average apparent
-# radius of the Sun (16 arcminutes) to the average amount of atmospheric
-# refraction at the horizon (34 arcminutes)."
-# Ref. : https://aa.usno.navy.mil/faq/RST_defs
-# Atmospheric refraction is always taken into account (through pvlib's output
-# 'apparent_zenith') so only the radius of the Sun is taken on board.
-sunset_angle = 90 + 16/60
-# Also, convert elevations to zenith angles for which we want to compute time
-angles = np.concatenate(([sunset_angle], 90 - finger_angles))
 #---
 #  Computational parameters
 #---
@@ -145,6 +156,14 @@ for lat, city in cities:
     print(city)
     for month in range(minmonth, maxmonth+1):
         print("month=", month)
+        # Following https://aa.usno.navy.mil/faq/RST_defs, sunset is defined to
+        # occur when the top of the solar disk appears to be tangent to the
+        # horizon, for an observer at sea level with a level, unobstructed
+        # horizon. That is, the center of the Sun is below the horizonal plane,
+        # by an extent equal to the angular radius of the Sun.
+        sunset_angle = 90 + get_solar_angular_radius(month)
+        # Convert elevations to zenith angles for which we want to compute time
+        angles = np.concatenate(([sunset_angle], 90 - finger_angles))
         # Searching solar noon, which is the minimum zenith angle reached
         # during the day
         solar_noon = minimize_scalar(wrapper_get_zenith, args=(month, lat),
